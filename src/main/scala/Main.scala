@@ -1,13 +1,13 @@
 import dataframes.DataframeLoader
 import org.apache.spark.ml.Pipeline
-import org.apache.spark.sql.{DataFrame, SaveMode, SparkSession}
-import org.apache.spark.ml.classification.{LogisticRegression, MultilayerPerceptronClassifier}
+import org.apache.spark.sql.SparkSession
+import org.apache.spark.ml.classification.LogisticRegression
 import org.apache.spark.ml.evaluation.MulticlassClassificationEvaluator
 import org.apache.log4j.{Level, Logger}
-import org.apache.spark.ml.feature.{VectorAssembler, VectorSizeHint}
-import org.apache.spark.ml.linalg.{VectorUDT, Vectors}
+import org.apache.spark.ml.feature.VectorAssembler
+import org.apache.spark.mllib.recommendation.{ALS, Rating}
+import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.functions._
-import org.apache.spark.ml.linalg.SQLDataTypes.VectorType
 import org.apache.spark.sql.types._
 
 
@@ -20,8 +20,6 @@ object Main extends App {
     .master("local[4]")
     .appName("recommenderV2")
     .getOrCreate()
-// D:/Daneshgah/final project/code/recommenderV2/src/main/resources/data/data/users.dat
-
 
   val loader = DataframeLoader(spark)
 
@@ -60,13 +58,9 @@ object Main extends App {
     genresString.toDouble
   }
 
-  val likesOrNot = udf { (rating: Double) =>
-    rating > 0.5
-  }
-
-  val getGenderInt = udf { (column: String) =>
+  val getGenderInt = udf { (column: Option[String]) =>
     column match {
-      case value if value equalsIgnoreCase "m" => 0
+      case Some(value) if value equalsIgnoreCase "m" => 0
       case _ => 1
     }
   }
@@ -74,56 +68,42 @@ object Main extends App {
     if (oldStringGenres.contains(genre)) 1 else 0
   }
 
-  val getRatings = udf { (UserID: Double, MovieID: Double , RatingUserID: Double, RatingMovieID: Double , rating: Double ) =>
-    if(UserID == RatingUserID && MovieID == RatingMovieID) Some(rating) else None
-  }
-
-  val MovieFeatures = genres.foldLeft(movies) {
+  val moviesWithGenresFeatures = genres.foldLeft(movies) {
     case (updatingMovies, genre) =>
       updatingMovies.withColumn(genre, getGenreValue(updatingMovies.col("Genres"), lit(genre)))
   }
 
-  val userMovie = ratings
-    .join(users)
-    .join(MovieFeatures)
-    .select(
-      users.col("UserID") cast IntegerType as "UserID",
-      MovieFeatures.col("MovieID") cast IntegerType as "MovieID",
-    )
-
   val Data = ratings
-    .join(users)
-    .join(MovieFeatures)
-    .join(userMovie)
+    .join(users, ratings.col("UserID") === users.col("UserID"), "right")
+    .join(moviesWithGenresFeatures, ratings.col("MovieID") === moviesWithGenresFeatures.col("MovieID"), "right")
     .select(
-      userMovie.col("UserID") cast IntegerType as "UserID",
-      userMovie.col("MovieID") cast IntegerType as "MovieID",
-      getRatings(userMovie.col("UserID") , userMovie.col("MovieID") , ratings.col("UserID") , ratings.col("MovieID"), ratings.col("Rating") ) cast DoubleType as "Rating",
+      users.col("UserID"),
+      moviesWithGenresFeatures.col("MovieID"),
+      ratings.col("Rating"),
       getGenderInt(users.col("Gender")) as "Gender",
-      users.col("Occupation") cast "Int" as "Occupation" ,
-      users.col("Age") cast "Int" as "Age",
-      likesOrNot(ratings.col("Rating")) cast IntegerType as "label",
-      MovieFeatures.col("Adventure") cast "Int" as "Adventure",
-      MovieFeatures.col("Action") cast "Int" as "Action",
-      MovieFeatures.col("Animation") cast "Int" as "Animation",
-      MovieFeatures.col("Children's") cast "Int" as "Children's",
-      MovieFeatures.col("Comedy") cast "Int" as "Comedy",
-      MovieFeatures.col("Crime") cast "Int" as "Crime",
-      MovieFeatures.col("Documentary") cast "Int" as "Documentary",
-      MovieFeatures.col("Drama") cast "Int" as "Drama",
-      MovieFeatures.col("Fantasy") cast "Int" as "Fantasy",
-      MovieFeatures.col("Film-Noir") cast "Int" as "Film-Noir",
-      MovieFeatures.col("Horror") cast "Int" as "Horror",
-      MovieFeatures.col("Musical") cast "Int" as "Musical",
-      MovieFeatures.col("Mystery") cast "Int" as "Mystery",
-      MovieFeatures.col("Romance") cast "Int" as "Romance",
-      MovieFeatures.col("Sci-Fi") cast "Int" as "Sci-Fi",
-      MovieFeatures.col("Thriller") cast "Int" as "Thriller",
-      MovieFeatures.col("War") cast "Int" as "War",
-      MovieFeatures.col("Western") cast "Int" as "Western",
-
-
+      users.col("Occupation") cast IntegerType,
+      users.col("Age") cast IntegerType,
+      when(ratings.col("Rating") gt 0.74, lit(1)).otherwise(lit(0)) cast DoubleType as "label",
+      moviesWithGenresFeatures.col("Adventure"),
+      moviesWithGenresFeatures.col("Action"),
+      moviesWithGenresFeatures.col("Animation"),
+      moviesWithGenresFeatures.col("Children's"),
+      moviesWithGenresFeatures.col("Comedy"),
+      moviesWithGenresFeatures.col("Crime"),
+      moviesWithGenresFeatures.col("Documentary"),
+      moviesWithGenresFeatures.col("Drama"),
+      moviesWithGenresFeatures.col("Fantasy"),
+      moviesWithGenresFeatures.col("Film-Noir"),
+      moviesWithGenresFeatures.col("Horror"),
+      moviesWithGenresFeatures.col("Musical"),
+      moviesWithGenresFeatures.col("Mystery"),
+      moviesWithGenresFeatures.col("Romance"),
+      moviesWithGenresFeatures.col("Sci-Fi"),
+      moviesWithGenresFeatures.col("Thriller"),
+      moviesWithGenresFeatures.col("War"),
+      moviesWithGenresFeatures.col("Western")
     )
+  val model = ALS.train(ratings.rdd.asInstanceOf[RDD[Rating]], 0, 0)
 
   Data.show(10,false)
 
@@ -154,11 +134,7 @@ object Main extends App {
       "Western"
     ))
     .setOutputCol("features")
-
-  val sizeHint = new VectorSizeHint()
-    .setInputCol("features")
     .setHandleInvalid("skip")
-    .setSize(4)
 
   val lr = new LogisticRegression()
     .setMaxIter(10)
@@ -176,9 +152,14 @@ object Main extends App {
 
   val result = lrModel.transform(testData)
 
+//  val predictionAndLabels = testData.map { case LabeledPoint(label, features) =>
+//    val prediction = model.predict(features)
+//    (prediction, label)
+//  }
+
   val predictionAndLabels = result.select("Rating", "features", "label")
   val evaluator = new MulticlassClassificationEvaluator()
-    .setPredictionCol("Rating")
+    .setPredictionCol("label")
     .setMetricName("accuracy")
 
   result.show(100, false)
