@@ -1,25 +1,27 @@
 import dataframes.DataframeLoader
 import org.apache.spark.ml.Pipeline
 import org.apache.spark.sql.SparkSession
-import org.apache.spark.ml.classification.LogisticRegression
 import org.apache.spark.ml.evaluation.MulticlassClassificationEvaluator
 import org.apache.log4j.{Level, Logger}
-import org.apache.spark.ml.feature.VectorAssembler
-import org.apache.spark.mllib.recommendation.{ALS, Rating}
-import org.apache.spark.rdd.RDD
+import org.apache.spark.ml.feature.{VectorAssembler, VectorSizeHint}
 import org.apache.spark.sql.functions._
+import org.apache.spark.ml.recommendation.ALS
 import org.apache.spark.sql.types._
+import services.algebra.{MovieService, UserService}
+import services.impl.{MovieServiceImpl, UserServiceImpl}
 
 
 object Main extends App {
 
   Logger.getLogger("org").setLevel(Level.ERROR)
-  System.setProperty("hadoop.home.dir", "C:\\Users\\lenovo\\hadoop")
+//  System.setProperty("hadoop.home.dir", "C:\\Users\\lenovo\\hadoop")
 
   val spark = SparkSession.builder()
     .master("local[4]")
     .appName("recommenderV2")
     .getOrCreate()
+// D:/Daneshgah/final project/code/recommenderV2/src/main/resources/data/data/users.dat
+
 
   val loader = DataframeLoader(spark)
 
@@ -27,6 +29,11 @@ object Main extends App {
   val movies = loader.getMovies()
   val ratings = loader.getRatings()
 
+  val userService: UserService = new UserServiceImpl(loader)
+  val movieService: MovieService = new MovieServiceImpl(loader)
+  userService.findById(1).foreach(println)
+  movieService.findById(1).foreach(println)
+  sys.exit(0)
 
   val genres: Set[String] = Set(
     "Action",
@@ -58,6 +65,10 @@ object Main extends App {
     genresString.toDouble
   }
 
+  val likesOrNot = udf { (rating: Double) =>
+    rating > 0.5
+  }
+
   val getGenderInt = udf { (column: Option[String]) =>
     column match {
       case Some(value) if value equalsIgnoreCase "m" => 0
@@ -77,13 +88,13 @@ object Main extends App {
     .join(users, ratings.col("UserID") === users.col("UserID"), "right")
     .join(moviesWithGenresFeatures, ratings.col("MovieID") === moviesWithGenresFeatures.col("MovieID"), "right")
     .select(
-      users.col("UserID"),
-      moviesWithGenresFeatures.col("MovieID"),
-      ratings.col("Rating"),
+      users.col("UserID") cast IntegerType,
+      moviesWithGenresFeatures.col("MovieID") cast IntegerType,
+      ratings.col("Rating") cast DoubleType,
       getGenderInt(users.col("Gender")) as "Gender",
       users.col("Occupation") cast IntegerType,
       users.col("Age") cast IntegerType,
-      when(ratings.col("Rating") gt 0.74, lit(1)).otherwise(lit(0)) cast DoubleType as "label",
+      when(ratings.col("Rating") gt 0.9, lit(1)).otherwise(lit(0)) as "label",
       moviesWithGenresFeatures.col("Adventure"),
       moviesWithGenresFeatures.col("Action"),
       moviesWithGenresFeatures.col("Animation"),
@@ -103,7 +114,6 @@ object Main extends App {
       moviesWithGenresFeatures.col("War"),
       moviesWithGenresFeatures.col("Western")
     )
-  val model = ALS.train(ratings.rdd.asInstanceOf[RDD[Rating]], 0, 0)
 
   Data.show(10,false)
 
@@ -136,15 +146,23 @@ object Main extends App {
     .setOutputCol("features")
     .setHandleInvalid("skip")
 
-  val lr = new LogisticRegression()
+  val sizeHint = new VectorSizeHint()
+    .setInputCol("features")
+    .setHandleInvalid("skip")
+    .setSize(4)
+
+  val als = new ALS("")
     .setMaxIter(10)
     .setRegParam(0.3)
-    .setElasticNetParam(0.8)
-    .setFeaturesCol("features")   // setting features column
-    .setLabelCol("label")       // setting label column
+    .setRank(10)
+    .setSeed(12345L)
+    .setUserCol("UserID")
+    .setItemCol("MovieID")
+    .setRatingCol("Rating")
+    .setPredictionCol("als_prediction")
 
   //creating pipeline
-  val pipeline = new Pipeline().setStages(Array(assembler,  lr))
+  val pipeline = new Pipeline().setStages(Array(assembler,  als))
 
   //fitting the model
 
@@ -152,14 +170,9 @@ object Main extends App {
 
   val result = lrModel.transform(testData)
 
-//  val predictionAndLabels = testData.map { case LabeledPoint(label, features) =>
-//    val prediction = model.predict(features)
-//    (prediction, label)
-//  }
-
   val predictionAndLabels = result.select("Rating", "features", "label")
   val evaluator = new MulticlassClassificationEvaluator()
-    .setPredictionCol("label")
+    .setPredictionCol("Rating")
     .setMetricName("accuracy")
 
   result.show(100, false)
